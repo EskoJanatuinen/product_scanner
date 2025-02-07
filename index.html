@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="fi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Tuoteskanneri</title>
+    <script type="module">
+      import * as zbarWasm from "https://cdn.jsdelivr.net/npm/@undecaf/zbar-wasm@0.10.1/dist/inlined/main.mjs";
+
+      const video = document.getElementById("video");
+      const result = document.getElementById("result");
+      let lastScanned = "";
+      let isScanning = false;
+
+      // Starts the camera and accesses the user's device camera
+      async function startCamera() {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: "environment" }, // Use the rear camera (environment facing)
+          });
+          video.srcObject = stream;
+          video.play();
+          // Start scanning once the video starts playing
+          video.addEventListener("playing", scanFrame);
+        } catch (error) {
+          result.innerText = "Virhe kamerassa: " + error.message; // Display camera error in UI
+        }
+      }
+
+      // Capture frames from the video and scan for QR codes
+      async function scanFrame() {
+        // Ensure there's enough data in the video and we're not already scanning
+        if (video.readyState === video.HAVE_ENOUGH_DATA && !isScanning) {
+          const canvas = document.createElement("canvas");
+          const context = canvas.getContext("2d");
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+          const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+          try {
+            // Scan the captured image for QR codes
+            const symbols = await zbarWasm.scanImageData(imageData);
+            if (symbols.length > 0) {
+              const qrData = symbols[0].decode();
+              if (qrData !== lastScanned) { // Ensure we only process new QR codes
+                lastScanned = qrData;
+                result.innerText = `Luettu: ${qrData}`; // Show scanned QR code in the UI
+                // Redirect to the URL containing the product ID
+                window.location.href = `https://kauppa.kierratyskeskus.fi/a/p/${qrData}/`;
+                isScanning = true;
+                // Prevent scanning again for 2 seconds
+                setTimeout(() => isScanning = false, 2000);
+              }
+            }
+          } catch (error) {
+            result.innerText = "Virhe skannauksessa: " + error.message; // Display scanning error in UI
+          }
+        }
+        // Continuously request new frames to scan
+        requestAnimationFrame(scanFrame);
+      }
+
+      // Handle browser back button (popstate event)
+      window.onpopstate = function () {
+        result.innerText = "Skannaa tuotekoodi"; // Reset the UI when going back
+        startCamera(); // Restart the camera when the user goes back
+      };
+
+      // Start the camera when the page loads
+      window.onload = startCamera;
+    </script>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 0;
+        padding: 0;
+        text-align: center;
+        background-color: #f4f4f4;
+      }
+      h1 { font-size: 1.5rem; margin-top: 20px; }
+      .video-container { position: relative; width: 90%; max-width: 600px; margin: 20px auto; }
+      video { width: 100%; height: auto; background-color: black; }
+      #result {
+        margin-top: 10px;
+        font-size: 1rem;
+        font-weight: bold;
+        color: green;
+        padding: 10px;
+        background-color: #fff;
+        border-radius: 5px;
+        max-width: 300px;
+        margin: 10px auto;
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Tuoteskanneri</h1>
+    <div class="video-container">
+      <video id="video" autoplay playsinline></video>
+    </div>
+    <p id="result">Skannaa tuotekoodi</p>
+  </body>
+</html>
+
+
