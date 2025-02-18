@@ -4,53 +4,146 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
 
-    <!-- Manifest-linkki -->
+    <!-- Manifest link for PWA -->
     <link rel="manifest" href="assets/site.webmanifest">
 
-    <!-- SVG favicon modernille selaimille -->
+    <!-- Favicons for different devices and browsers -->
     <link rel="icon" href="assets/kk_logo.svg" type="image/svg+xml">
-    
-    <!-- PNG-favicon eri kokoisille laitteille -->
     <link rel="icon" href="assets/favicon-32x32.png" type="image/png" sizes="32x32">
     <link rel="icon" href="assets/favicon-16x16.png" type="image/png" sizes="16x16">
-    
-    <!-- Apple Touch Icon iOS-laitteille -->
-    <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
-    
-    <!-- Android Chrome high-res icons -->
     <link rel="icon" href="assets/android-chrome-192x192.png" sizes="192x192">
     <link rel="icon" href="assets/android-chrome-512x512.png" sizes="512x512">
-    
-    <!-- ICO-favicon vanhoille selaimille -->
     <link rel="icon" href="assets/favicon.ico" type="image/x-icon">
-    
+    <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+
     <title>Tuoteskanneri</title>
+
     <script type="module">
       import * as zbarWasm from "https://cdn.jsdelivr.net/npm/@undecaf/zbar-wasm@0.10.1/dist/inlined/main.mjs";
 
       const video = document.getElementById("video");
       const result = document.getElementById("result");
+      const cameraSelect = document.getElementById("cameraSelect");
       let lastScanned = "";
       let isScanning = false;
+      let currentStream = null;
 
-      // Starts the camera and accesses the user's device camera
-      async function startCamera() {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: "environment" }, // Use the rear camera (environment facing)
-          });
-          video.srcObject = stream;
-          video.play();
-          // Start scanning once the video starts playing
-          video.addEventListener("playing", scanFrame);
-        } catch (error) {
-          result.innerText = "Virhe kamerassa: " + error.message; // Display camera error in UI
+      // Save selected camera to local storage for future use
+      function saveSelectedCamera(deviceId) {
+        localStorage.setItem('selectedCamera', deviceId);
+      }
+
+      // Retrieve saved camera from local storage
+      function getSavedCamera() {
+        return localStorage.getItem('selectedCamera');
+      }
+
+      // Select a camera from the dropdown menu
+      window.selectCamera = function(deviceId) {
+        saveSelectedCamera(deviceId);
+        startCamera(deviceId);
+      }
+
+      // Set camera focus mode to continuous autofocus
+      async function setFocusMode(track) {
+        const capabilities = track.getCapabilities();
+        if (capabilities.focusMode) {
+          try {
+            await track.applyConstraints({
+              advanced: [{ focusMode: "continuous" }]
+            });
+          } catch (err) {
+            console.error('Error setting focus mode:', err);
+          }
         }
       }
 
-      // Capture frames from the video and scan for QR codes
+      // Start the camera stream with the selected device
+      async function startCamera(deviceId = null) {
+        try {
+          if (currentStream) {
+            currentStream.getTracks().forEach(track => track.stop());
+          }
+
+          const constraints = {
+            video: {
+              deviceId: deviceId ? { exact: deviceId } : undefined,
+              facingMode: deviceId ? undefined : { ideal: 'environment' },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
+              frameRate: { ideal: 30 },
+              focusMode: { ideal: "continuous" }
+            }
+          };
+
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          currentStream = stream;
+          video.srcObject = stream;
+
+          const videoTrack = stream.getVideoTracks()[0];
+          await setFocusMode(videoTrack);
+
+          if (deviceId) {
+            cameraSelect.value = deviceId;
+          }
+
+          video.addEventListener('loadedmetadata', () => {
+            video.play().catch(e => console.error('Error playing video:', e));
+          });
+
+          video.addEventListener("playing", scanFrame);
+        } catch (error) {
+          result.innerText = "Camera error: " + error.message;
+        }
+      }
+
+      // Populate the camera selection dropdown
+      async function populateCameraMenu() {
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const videoDevices = devices.filter(device => device.kind === 'videoinput');
+
+          // Prioritize cameras labeled as "back" or "rear"
+          const backCameras = videoDevices.filter(device =>
+            device.label.toLowerCase().includes('back') ||
+            device.label.toLowerCase().includes('rear')
+          );
+
+          // If back cameras exist, use them; otherwise, show all cameras
+          let availableCameras = backCameras.length > 0 ? backCameras : videoDevices;
+
+          // Sort cameras by device ID for consistency
+          availableCameras.sort((a, b) => a.deviceId.localeCompare(b.deviceId));
+
+          // Clear the camera selection dropdown
+          cameraSelect.innerHTML = '';
+
+          // Populate the dropdown with available cameras
+          availableCameras.forEach(device => {
+            const option = document.createElement('option');
+            option.value = device.deviceId;
+            option.textContent = device.label || `Camera ${cameraSelect.children.length}`;
+            cameraSelect.appendChild(option);
+          });
+
+          if (availableCameras.length > 0) {
+            // Retrieve the last used camera from storage
+            const savedCameraId = getSavedCamera();
+            const savedCameraExists = availableCameras.some(device => device.deviceId === savedCameraId);
+
+            // Select the previously used camera if available, otherwise use the first one
+            let selectedDeviceId = savedCameraExists ? savedCameraId : availableCameras[0].deviceId;
+
+            saveSelectedCamera(selectedDeviceId);
+            startCamera(selectedDeviceId);
+          }
+        } catch (err) {
+          console.error('Error getting cameras:', err);
+        }
+      }
+
+      // Scan a frame from the video feed for QR codes
       async function scanFrame() {
-        // Ensure there's enough data in the video and we're not already scanning
         if (video.readyState === video.HAVE_ENOUGH_DATA && !isScanning) {
           const canvas = document.createElement("canvas");
           const context = canvas.getContext("2d");
@@ -60,37 +153,49 @@
 
           const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
           try {
-            // Scan the captured image for QR codes
             const symbols = await zbarWasm.scanImageData(imageData);
             if (symbols.length > 0) {
               const qrData = symbols[0].decode();
-              if (qrData !== lastScanned) { // Ensure we only process new QR codes
+              if (qrData !== lastScanned) {
                 lastScanned = qrData;
-                result.innerText = `Luettu: ${qrData}`; // Show scanned QR code in the UI
-                // Redirect to the URL containing the product ID
+                result.innerText = `Tuotekoodi: ${qrData}`;
                 window.location.href = `https://kauppa.kierratyskeskus.fi/a/p/${qrData}/`;
                 isScanning = true;
-                // Prevent scanning again for 2 seconds
-                setTimeout(() => isScanning = false, 2000);
+                setTimeout(() => isScanning = false, 2000); // Prevent repeated scans in quick succession
               }
             }
           } catch (error) {
-            result.innerText = "Virhe skannauksessa: " + error.message; // Display scanning error in UI
+            result.innerText = "Scanning error: " + error.message;
           }
         }
-        // Continuously request new frames to scan
         requestAnimationFrame(scanFrame);
       }
 
-      // Handle browser back button (popstate event)
+      // Handle browser back button press to reset camera and result message
       window.onpopstate = function () {
-        result.innerText = "Skannaa tuotekoodi"; // Reset the UI when going back
-        startCamera(); // Restart the camera when the user goes back
+        result.innerText = "Lue tuotekoodi";
+        const savedCameraId = getSavedCamera();
+        if (savedCameraId) {
+          startCamera(savedCameraId);
+        } else {
+          populateCameraMenu();
+        }
       };
 
-      // Start the camera when the page loads
-      window.onload = startCamera;
+      // Initialize camera selection when the page loads
+      window.onload = async () => {
+        try {
+          await navigator.mediaDevices.getUserMedia({ video: true })
+            .then(stream => {
+              stream.getTracks().forEach(track => track.stop()); // Stop any active streams before populating camera menu
+              populateCameraMenu();
+            });
+        } catch (err) {
+          result.innerText = "Camera permission error: " + err.message;
+        }
+      };
     </script>
+
     <style>
       body {
         font-family: Arial, sans-serif;
@@ -100,29 +205,23 @@
         background-color: #f4f4f4;
       }
       h1 { font-size: 1.5rem; margin-top: 20px; }
-      .video-container { position: relative; width: 90%; max-width: 600px; margin: 20px auto; }
-      video { width: 100%; height: auto; background-color: black; }
-      #result {
-        margin-top: 10px;
-        font-size: 1rem;
-        font-weight: bold;
-        color: green;
-        padding: 10px;
-        background-color: #fff;
-        border-radius: 5px;
-        max-width: 300px;
-        margin: 10px auto;
-        text-align: center;
-      }
+      .video-container { width: 90%; max-width: 600px; margin: 20px auto; }
+      video { width: 100%; background-color: black; }
+      #result { font-size: 1rem; font-weight: bold; }
+      #cameraSelect { padding: 8px; font-size: 1rem; max-width: 300px; }
     </style>
   </head>
   <body>
     <h1>Tuoteskanneri</h1>
+    <select 
+      id="cameraSelect" 
+      onchange="selectCamera(this.value)"
+      aria-label="Vaihda kamera"
+      title="Vaihda kamera">
+    </select>
     <div class="video-container">
       <video id="video" autoplay playsinline></video>
     </div>
-    <p id="result">Skannaa tuotekoodi</p>
+    <p id="result">Lue tuotekoodi</p>
   </body>
 </html>
-
-
